@@ -23,6 +23,7 @@ class Process:
     comm: str
     cmdline: str
     cwd: str
+    argv: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,21 +45,27 @@ def resolve_dir(raw: str, cwd: str, home: str) -> str:
     return cwd.rstrip("/") + "/" + raw
 
 
-def _basename(cmdline: str) -> str:
-    parts = cmdline.split()
-    if not parts:
-        return ""
-    return parts[0].rsplit("/", 1)[-1]
+def _argv(proc: Process) -> list[str]:
+    if proc.argv:
+        return list(proc.argv)
+    return proc.cmdline.split()
 
 
-def _flag(cmdline: str, flag: str) -> str:
-    parts = cmdline.split()
-    if flag not in parts:
+def _basename(proc: Process) -> str:
+    argv = _argv(proc)
+    if not argv:
         return ""
-    index = parts.index(flag)
-    if index + 1 >= len(parts):
+    return argv[0].rsplit("/", 1)[-1]
+
+
+def _flag(proc: Process, flag: str) -> str:
+    argv = _argv(proc)
+    if flag not in argv:
         return ""
-    return parts[index + 1]
+    index = argv.index(flag)
+    if index + 1 >= len(argv):
+        return ""
+    return argv[index + 1]
 
 
 def match_agents(processes: list[Process], own_pid: int, home: str) -> list[Matched]:
@@ -67,17 +74,18 @@ def match_agents(processes: list[Process], own_pid: int, home: str) -> list[Matc
     for proc in processes:
         if proc.pid == own_pid:
             continue
-        base = _basename(proc.cmdline)
+        base = _basename(proc)
         if proc.comm == "systemd-inhibit" or base == "systemd-inhibit":
             continue
         if (proc.comm == "grok" or base == "grok") and "grok-bot" not in proc.cmdline:
             found.append(Matched("Grok", proc.pid, proc.cwd, "", ""))
             continue
-        if "grok-bot" in proc.cmdline and "--type=" not in proc.cmdline:
-            found.append(Matched("Grok Bot", proc.pid, proc.cwd, "", ""))
+        if "grok-bot" in proc.cmdline:
+            if "--type=" not in proc.cmdline:
+                found.append(Matched("Grok Bot", proc.pid, proc.cwd, "", ""))
             continue
         if "cursor-agent" in proc.cmdline and "--worker-dir" in proc.cmdline:
-            project = resolve_dir(_flag(proc.cmdline, "--worker-dir"), proc.cwd, home)
+            project = resolve_dir(_flag(proc, "--worker-dir"), proc.cwd, home)
             found.append(Matched("Cursor agent", proc.pid, project, "", ""))
             continue
         if proc.comm == "claude" or base == "claude":
@@ -366,11 +374,17 @@ def read_processes(proc_root: str) -> list[Process]:
             with open(os.path.join(entry, "comm"), "r", encoding="utf-8", errors="replace") as handle:
                 comm = handle.read().strip()
             with open(os.path.join(entry, "cmdline"), "rb") as handle:
-                cmdline = handle.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+                raw = handle.read()
+            argv = tuple(
+                part.decode("utf-8", "replace")
+                for part in raw.split(b"\x00")
+                if part
+            )
+            cmdline = " ".join(argv)
             cwd = os.readlink(os.path.join(entry, "cwd"))
         except OSError:
             continue
-        found.append(Process(int(name), comm, cmdline, cwd))
+        found.append(Process(int(name), comm, cmdline, cwd, argv))
     return found
 
 

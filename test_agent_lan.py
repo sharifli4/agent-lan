@@ -55,6 +55,32 @@ class TestMatch(unittest.TestCase):
             "/home/kenan/repositories/dosty/walks/walks-mobile-api-nestjs",
         )
 
+    def test_grok_bot_helper_is_not_mcp(self):
+        processes = [
+            agent_lan.Process(
+                2,
+                "grok-bot",
+                "/opt/Grok Bot/grok-bot --type=renderer --sand-mcp-app",
+                "/home/kenan",
+            )
+        ]
+        self.assertEqual(agent_lan.match_agents(processes, 0, "/home/kenan"), [])
+
+    def test_worker_dir_keeps_spaces_from_proc(self):
+        with tempfile.TemporaryDirectory() as root:
+            entry = os.path.join(root, "4")
+            os.makedirs(entry)
+            with open(os.path.join(entry, "comm"), "w") as handle:
+                handle.write("MainThread\n")
+            with open(os.path.join(entry, "cmdline"), "wb") as handle:
+                handle.write(b"cursor-agent\x00--worker-dir\x00/home/kenan/My Projects/app\x00")
+            os.symlink("/tmp", os.path.join(entry, "cwd"))
+            processes = agent_lan.read_processes(root)
+        found = agent_lan.match_agents(processes, 0, "/home/kenan")
+        self.assertEqual(found[0].name, "Cursor agent")
+        self.assertEqual(found[0].project, "/home/kenan/My Projects/app")
+        self.assertNotIn("api-key", repr(found))
+
 
 class TestNotes(unittest.TestCase):
     def test_edit_beats_later_read(self):

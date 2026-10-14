@@ -194,3 +194,40 @@ def newest_jsonl(directory: str) -> str | None:
     if not found:
         return None
     return max(found, key=os.path.getmtime)
+
+
+def attach_files(matched, sessions, read_text, grok_home: str, cursor_projects: str):
+    by_pid = {item["pid"]: item for item in sessions}
+    attached = []
+    for item in matched:
+        if item.name == "Grok":
+            session = by_pid.get(item.pid)
+            project = item.project
+            file_path = ""
+            action = ""
+            if session:
+                project = session.get("cwd") or project
+                notes = grok_history_path(grok_home, project, session["session_id"])
+                text = read_text(notes)
+                if text:
+                    file_path, action = choose_file(grok_events(text))
+            attached.append(Matched(item.name, item.pid, project, file_path, action))
+            continue
+        if item.name == "Cursor agent":
+            folder = (
+                cursor_projects.rstrip("/")
+                + "/"
+                + cursor_slug(item.project)
+                + "/agent-transcripts"
+            )
+            notes = newest_jsonl(folder)
+            file_path = ""
+            action = ""
+            if notes:
+                text = read_text(notes)
+                if text:
+                    file_path, action = choose_file(cursor_events(text))
+            attached.append(Matched(item.name, item.pid, item.project, file_path, action))
+            continue
+        attached.append(item)
+    return attached

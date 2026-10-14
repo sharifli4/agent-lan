@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 
@@ -117,6 +118,55 @@ class TestNotes(unittest.TestCase):
             os.utime(newer, (2, 2))
             self.assertEqual(agent_lan.newest_jsonl(directory), newer)
         self.assertIsNone(agent_lan.newest_jsonl("/missing/agent-notes"))
+
+
+class TestAttach(unittest.TestCase):
+    def test_grok_session_file_wins(self):
+        text = json.dumps({"name": "read_file", "arguments": {"target_file": "/home/kenan/only.py"}})
+        def read_text(path):
+            self.assertEqual(
+                path,
+                agent_lan.grok_history_path("/home/kenan/.grok", "/work/session", "abc"),
+            )
+            return text
+        matched = [agent_lan.Matched("Grok", 7, "/home/kenan", "", "")]
+        sessions = [{"pid": 7, "cwd": "/work/session", "session_id": "abc"}]
+        out = agent_lan.attach_files(
+            matched, sessions, read_text, "/home/kenan/.grok", "/home/kenan/.cursor/projects"
+        )
+        self.assertEqual(out[0].project, "/work/session")
+        self.assertEqual(out[0].file, "/home/kenan/only.py")
+        self.assertEqual(out[0].action, "reading")
+
+    def test_cursor_uses_newest_transcript(self):
+        with tempfile.TemporaryDirectory() as projects:
+            slug = "home-kenan-repositories-app"
+            folder = os.path.join(projects, slug, "agent-transcripts")
+            os.makedirs(folder)
+            path = os.path.join(folder, "one.jsonl")
+            with open(path, "w") as handle:
+                handle.write(json.dumps({
+                    "type": "tool_use",
+                    "name": "StrReplace",
+                    "input": {"path": "/home/kenan/repositories/app/src/user.ts"},
+                }))
+            matched = [agent_lan.Matched("Cursor agent", 4, "/home/kenan/repositories/app", "", "")]
+
+            def read_text(path):
+                with open(path, encoding="utf-8") as handle:
+                    return handle.read()
+
+            out = agent_lan.attach_files(matched, [], read_text, "/home/kenan/.grok", projects)
+            self.assertEqual(out[0].file, "/home/kenan/repositories/app/src/user.ts")
+            self.assertEqual(out[0].action, "editing")
+
+    def test_other_agents_stay_blank(self):
+        matched = [
+            agent_lan.Matched("Grok Bot", 3, "/home/kenan", "", ""),
+            agent_lan.Matched("MCP", 0, "", "", ""),
+        ]
+        out = agent_lan.attach_files(matched, [], lambda _path: None, "/home/kenan/.grok", "/missing")
+        self.assertEqual(out, matched)
 
 
 if __name__ == "__main__":

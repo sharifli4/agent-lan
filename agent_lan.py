@@ -3,8 +3,11 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import pathlib
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 
 
@@ -342,3 +345,115 @@ setInterval(refresh, 2000);
 </body>
 </html>
 """
+
+
+REPORT_INTERVAL = 3
+
+
+def read_processes(proc_root: str) -> list[Process]:
+    found = []
+    for name in os.listdir(proc_root):
+        if not name.isdigit():
+            continue
+        entry = os.path.join(proc_root, name)
+        try:
+            with open(os.path.join(entry, "comm"), "r", encoding="utf-8", errors="replace") as handle:
+                comm = handle.read().strip()
+            with open(os.path.join(entry, "cmdline"), "rb") as handle:
+                cmdline = handle.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+            cwd = os.readlink(os.path.join(entry, "cwd"))
+        except OSError:
+            continue
+        found.append(Process(int(name), comm, cmdline, cwd))
+    return found
+
+
+def note_for(hostname: str, ip: str, matched: list[Matched]):
+    if not matched:
+        return None
+    return {
+        "hostname": hostname,
+        "ip": ip,
+        "agents": [
+            {"name": item.name, "project": item.project, "file": item.file, "action": item.action}
+            for item in matched
+        ],
+    }
+
+
+def local_ip_toward(host: str, port: int, opener) -> str:
+    try:
+        sock = opener(host, port)
+    except OSError:
+        return "127.0.0.1"
+    try:
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+class Speak:
+    def __init__(self):
+        self._failing = False
+        self._refused = False
+
+    def connection_failed(self):
+        if self._failing:
+            return None
+        self._failing = True
+        return "board is not answering"
+
+    def refused(self):
+        if self._refused:
+            return None
+        self._refused = True
+        return "board refused the word"
+
+    def ok(self):
+        line = "board is back" if self._failing else None
+        self._failing = False
+        self._refused = False
+        return line
+
+
+def copy_instruction(path) -> str:
+    return f"Copy {path} to each other PC."
+
+
+def ensure_config(path, hub: str, token: str) -> dict:
+    path = pathlib.Path(path)
+    if path.exists():
+        return json.loads(path.read_text())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"hub": hub, "token": token}
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return data
+
+
+def require_config(path) -> dict:
+    path = pathlib.Path(path)
+    if not path.exists():
+        raise SystemExit(copy_instruction(path))
+    return json.loads(path.read_text())
+
+
+def report_once(config, matched, hostname: str, ip: str, speak: Speak, urlopen):
+    note = note_for(hostname, ip, matched)
+    if note is None:
+        return None
+    request = urllib.request.Request(
+        config["hub"].rstrip("/") + "/api/report",
+        data=json.dumps(note).encode(),
+        headers={"Content-Type": "application/json", "X-Agent-Lan-Token": config["token"]},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=2) as response:
+            response.read()
+        return speak.ok()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return speak.refused()
+        return speak.connection_failed()
+    except OSError:
+        return speak.connection_failed()

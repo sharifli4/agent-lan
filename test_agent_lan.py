@@ -217,5 +217,90 @@ class TestPage(unittest.TestCase):
         self.assertIn("catch (e) {}", html)
 
 
+class FakeResponse:
+    def __init__(self, status=200):
+        self.status = status
+    def read(self):
+        return b""
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestReporter(unittest.TestCase):
+    def test_proc_and_note_hide_the_command_line(self):
+        with tempfile.TemporaryDirectory() as root:
+            entry = os.path.join(root, "9")
+            os.makedirs(entry)
+            with open(os.path.join(entry, "comm"), "w") as handle:
+                handle.write("grok\n")
+            with open(os.path.join(entry, "cmdline"), "wb") as handle:
+                handle.write(b"grok\x00--api-key\x00crsr_secret\x00")
+            os.symlink("/home/kenan", os.path.join(entry, "cwd"))
+            processes = agent_lan.read_processes(root)
+        self.assertEqual(processes[0].comm, "grok")
+        self.assertEqual(processes[0].cwd, "/home/kenan")
+        matched = [agent_lan.Matched("Grok", 9, "/home/kenan", "/home/kenan/a.py", "editing")]
+        note = agent_lan.note_for("asus-rog", "192.168.0.69", matched)
+        encoded = json.dumps(note)
+        self.assertNotIn("crsr_secret", encoded)
+        self.assertNotIn("cmdline", encoded)
+        self.assertIsNone(agent_lan.note_for("asus-rog", "192.168.0.69", []))
+
+    def test_local_ip_uses_the_socket(self):
+        class Sock:
+            def getsockname(self):
+                return ("192.168.0.69", 40000)
+            def close(self):
+                pass
+        self.assertEqual(agent_lan.local_ip_toward("192.168.0.254", 9, lambda host, port: Sock()), "192.168.0.69")
+
+        def boom(host, port):
+            raise OSError("network down")
+        self.assertEqual(agent_lan.local_ip_toward("192.168.0.254", 9, boom), "127.0.0.1")
+
+    def test_retry_lines(self):
+        speak = agent_lan.Speak()
+        self.assertEqual(speak.connection_failed(), "board is not answering")
+        self.assertIsNone(speak.connection_failed())
+        self.assertEqual(speak.ok(), "board is back")
+        self.assertIsNone(speak.ok())
+        self.assertEqual(speak.refused(), "board refused the word")
+        self.assertIsNone(speak.refused())
+        self.assertIsNone(speak.ok())
+        self.assertEqual(speak.refused(), "board refused the word")
+
+    def test_config_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            made = agent_lan.ensure_config(path, "http://192.168.0.69:8787", "secret")
+            again = agent_lan.ensure_config(path, "http://192.168.0.69:8787", "other")
+            self.assertEqual(made["token"], "secret")
+            self.assertEqual(again["token"], "secret")
+            self.assertIn(str(path), agent_lan.copy_instruction(path))
+            missing = pathlib.Path(directory) / "missing.json"
+            with self.assertRaises(SystemExit) as caught:
+                agent_lan.require_config(missing)
+            self.assertIn(str(missing), str(caught.exception))
+
+    def test_report_once(self):
+        matched = [agent_lan.Matched("Grok", 9, "/home/kenan", "", "")]
+        config = {"hub": "http://192.168.0.69:8787", "token": "secret"}
+        seen = {}
+        def urlopen(req, timeout):
+            seen["url"] = req.full_url
+            seen["token"] = req.get_header("X-agent-lan-token")
+            return FakeResponse()
+        speak = agent_lan.Speak()
+        speak.connection_failed()
+        line = agent_lan.report_once(config, matched, "asus-rog", "192.168.0.69", speak, urlopen)
+        self.assertEqual(line, "board is back")
+        self.assertEqual(seen["url"], "http://192.168.0.69:8787/api/report")
+        self.assertEqual(seen["token"], "secret")
+        self.assertIsNone(agent_lan.report_once(config, [], "asus-rog", "192.168.0.69", speak, urlopen))
+        self.assertEqual(agent_lan.REPORT_INTERVAL, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

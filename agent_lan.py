@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import urllib.parse
 from dataclasses import dataclass
 
 
@@ -77,3 +80,117 @@ def match_agents(processes: list[Process], own_pid: int, home: str) -> list[Matc
     if saw_mcp:
         found.append(Matched("MCP", 0, "", "", ""))
     return found
+
+
+def choose_file(events: list[tuple[str, str]]) -> tuple[str, str]:
+    edited = ""
+    read = ""
+    for kind, path in events:
+        if not path:
+            continue
+        if kind == "edit":
+            edited = path
+        elif kind == "read":
+            read = path
+    if edited:
+        return edited, "editing"
+    if read:
+        return read, "reading"
+    return "", ""
+
+
+def _walk(obj, visit) -> None:
+    if isinstance(obj, dict):
+        visit(obj)
+        for value in obj.values():
+            _walk(value, visit)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk(item, visit)
+
+
+def _events_from_jsonl(text: str, visit) -> list[tuple[str, str]]:
+    events: list[tuple[str, str]] = []
+
+    def collect(obj: dict) -> None:
+        found = visit(obj)
+        if found:
+            events.append(found)
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        _walk(parsed, collect)
+    return events
+
+
+def grok_events(text: str) -> list[tuple[str, str]]:
+    edits = {"search_replace", "write"}
+    reads = {"read_file"}
+
+    def visit(obj: dict):
+        name = obj.get("name")
+        if name not in edits and name not in reads:
+            return None
+        args = obj.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(args, dict):
+            return None
+        for key in ("file_path", "target_file", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value:
+                kind = "edit" if name in edits else "read"
+                return kind, value
+        return None
+
+    return _events_from_jsonl(text, visit)
+
+
+def cursor_events(text: str) -> list[tuple[str, str]]:
+    def visit(obj: dict):
+        if obj.get("type") != "tool_use":
+            return None
+        name = obj.get("name")
+        if name not in {"StrReplace", "Write", "Read"}:
+            return None
+        payload = obj.get("input")
+        if not isinstance(payload, dict):
+            return None
+        path = payload.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        kind = "read" if name == "Read" else "edit"
+        return kind, path
+
+    return _events_from_jsonl(text, visit)
+
+
+def cursor_slug(abs_path: str) -> str:
+    return abs_path.lstrip("/").replace("/", "-")
+
+
+def grok_history_path(grok_home: str, cwd: str, session_id: str) -> str:
+    quoted = urllib.parse.quote(cwd, safe="")
+    return grok_home.rstrip("/") + "/sessions/" + quoted + "/" + session_id + "/chat_history.jsonl"
+
+
+def newest_jsonl(directory: str) -> str | None:
+    if not os.path.isdir(directory):
+        return None
+    found: list[str] = []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if name.endswith(".jsonl"):
+                found.append(os.path.join(root, name))
+    if not found:
+        return None
+    return max(found, key=os.path.getmtime)

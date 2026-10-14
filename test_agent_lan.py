@@ -1,3 +1,6 @@
+import json
+import os
+import tempfile
 import unittest
 
 import agent_lan
@@ -50,6 +53,70 @@ class TestMatch(unittest.TestCase):
             found[0].project,
             "/home/kenan/repositories/dosty/walks/walks-mobile-api-nestjs",
         )
+
+
+class TestNotes(unittest.TestCase):
+    def test_edit_beats_later_read(self):
+        events = [("edit", "/home/kenan/a.py"), ("read", "/home/kenan/b.py")]
+        self.assertEqual(agent_lan.choose_file(events), ("/home/kenan/a.py", "editing"))
+
+    def test_read_only(self):
+        self.assertEqual(
+            agent_lan.choose_file([("read", "/home/kenan/b.py")]),
+            ("/home/kenan/b.py", "reading"),
+        )
+
+    def test_no_path(self):
+        self.assertEqual(agent_lan.choose_file([]), ("", ""))
+
+    def test_grok_object_and_json_string(self):
+        text = "\n".join([
+            json.dumps({"name": "write", "arguments": {"file_path": "/home/kenan/a.py"}}),
+            json.dumps({"name": "read_file", "arguments": json.dumps({"target_file": "/home/kenan/b.py"})}),
+            json.dumps({"name": "search_replace", "arguments": {"path": "/home/kenan/c.py"}}),
+        ])
+        self.assertEqual(
+            agent_lan.choose_file(agent_lan.grok_events(text)),
+            ("/home/kenan/c.py", "editing"),
+        )
+
+    def test_cursor_tools_and_slug(self):
+        text = "\n".join([
+            json.dumps({"message": {"content": [{"type": "tool_use", "name": "Write", "input": {"path": "/home/kenan/a.ts"}}]}}),
+            json.dumps({"message": {"content": [{"type": "tool_use", "name": "Read", "input": {"path": "/home/kenan/b.ts"}}]}}),
+        ])
+        self.assertEqual(
+            agent_lan.choose_file(agent_lan.cursor_events(text)),
+            ("/home/kenan/a.ts", "editing"),
+        )
+        project = agent_lan.resolve_dir(
+            "~/repositories/dosty/walks/walks-mobile-api-nestjs",
+            "/tmp",
+            "/home/kenan",
+        )
+        self.assertEqual(
+            agent_lan.cursor_slug(project),
+            "home-kenan-repositories-dosty-walks-walks-mobile-api-nestjs",
+        )
+
+    def test_grok_history_path(self):
+        self.assertEqual(
+            agent_lan.grok_history_path("/home/kenan/.grok", "/home/kenan", "abc"),
+            "/home/kenan/.grok/sessions/%2Fhome%2Fkenan/abc/chat_history.jsonl",
+        )
+
+    def test_newest_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            older = os.path.join(directory, "old.jsonl")
+            nested = os.path.join(directory, "sub")
+            os.makedirs(nested)
+            newer = os.path.join(nested, "new.jsonl")
+            open(older, "w").close()
+            open(newer, "w").close()
+            os.utime(older, (1, 1))
+            os.utime(newer, (2, 2))
+            self.assertEqual(agent_lan.newest_jsonl(directory), newer)
+        self.assertIsNone(agent_lan.newest_jsonl("/missing/agent-notes"))
 
 
 if __name__ == "__main__":

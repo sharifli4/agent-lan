@@ -273,3 +273,72 @@ class Board:
                     "seen_at": seen,
                 })
         return rows
+
+
+def render_page() -> str:
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent LAN</title>
+<style>
+body { font-family: sans-serif; margin: 2rem; }
+table { border-collapse: collapse; }
+th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>Agent LAN</h1>
+<p id="empty">No agent is running.</p>
+<table>
+<thead><tr><th>Computer</th><th>IP</th><th>Agent</th><th>Project</th><th>File</th></tr></thead>
+<tbody></tbody>
+</table>
+<script>
+function base(path) {
+  if (!path) return "";
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+function draw(agents) {
+  const body = document.querySelector("tbody");
+  const empty = document.querySelector("#empty");
+  body.replaceChildren();
+  if (!agents.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  for (const agent of agents) {
+    const tr = document.createElement("tr");
+    const file = base(agent.file || "");
+    const cells = [
+      agent.hostname || "",
+      agent.ip || "",
+      agent.name || "",
+      base(agent.project || ""),
+      file && agent.action ? file + " " + agent.action : file
+    ];
+    cells.forEach((value, index) => {
+      const td = document.createElement("td");
+      td.textContent = value;
+      if (index === 3 && agent.project) td.title = agent.project;
+      if (index === 4 && agent.file) td.title = agent.file;
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  }
+}
+async function refresh() {
+  try {
+    const res = await fetch("/api/agents");
+    const data = await res.json();
+    draw(data.agents || []);
+  } catch (e) {}
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+"""

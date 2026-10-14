@@ -205,5 +205,17 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(agent_lan.STALE_SECONDS, 12)
 
 
+class TestPage(unittest.TestCase):
+    def test_table_and_safe_refresh(self):
+        html = agent_lan.render_page()
+        self.assertIn("No agent is running.", html)
+        for label in ("Computer", "IP", "Agent", "Project", "File"):
+            self.assertIn(label, html)
+        self.assertIn("setInterval(refresh, 2000)", html)
+        self.assertIn("textContent", html)
+        self.assertNotIn("innerHTML", html)
+        self.assertIn("catch (e) {}", html)
+
+
 if __name__ == "__main__":
     unittest.main()

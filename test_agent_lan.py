@@ -302,5 +302,55 @@ class TestReporter(unittest.TestCase):
         self.assertEqual(agent_lan.REPORT_INTERVAL, 3)
 
 
+class TestWire(unittest.TestCase):
+    def test_dispatch_get_and_post(self):
+        board = agent_lan.Board("secret", now=lambda: 10.0)
+        status, body, content_type = agent_lan.dispatch("GET", "/api/agents", {}, b"", board)
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", content_type)
+        self.assertEqual(json.loads(body)["agents"], [])
+        status, body, content_type = agent_lan.dispatch("GET", "/", {}, b"", board)
+        self.assertIn(b"No agent is running.", body)
+        self.assertIn("text/html", content_type)
+        note = json.dumps({
+            "hostname": "asus-rog",
+            "ip": "192.168.0.69",
+            "agents": [{"name": "Grok", "project": "/home/kenan", "file": "", "action": ""}],
+        }).encode()
+        status, _body, _kind = agent_lan.dispatch(
+            "POST", "/api/report", {"X-Agent-Lan-Token": "secret"}, note, board
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(agent_lan.dispatch("GET", "/api/agents", {}, b"", board)[1].count(b"Grok"), 1)
+        refused, _body, _kind = agent_lan.dispatch("POST", "/api/report", {}, note, board)
+        self.assertEqual(refused, 401)
+        self.assertEqual(agent_lan.BIND, ("0.0.0.0", 8787))
+        self.assertEqual(agent_lan.HUB, "http://192.168.0.69:8787")
+
+    def test_prepare_board_creates_config_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "config.json"
+            first = agent_lan.prepare_board(path)
+            second = agent_lan.prepare_board(path)
+            self.assertEqual(first["hub"], "http://192.168.0.69:8787")
+            self.assertEqual(second["token"], first["token"])
+            self.assertGreaterEqual(len(first["token"]), 16)
+            code = agent_lan.main(["report", "--config", str(pathlib.Path(directory) / "missing.json")])
+            self.assertEqual(code, 1)
+
+    def test_collect_reads_fake_proc(self):
+        with tempfile.TemporaryDirectory() as root:
+            entry = os.path.join(root, "9")
+            os.makedirs(entry)
+            with open(os.path.join(entry, "comm"), "w") as handle:
+                handle.write("grok\n")
+            with open(os.path.join(entry, "cmdline"), "wb") as handle:
+                handle.write(b"grok\x00")
+            os.symlink("/home/kenan", os.path.join(entry, "cwd"))
+            found = agent_lan.collect(root, 0, "/home/kenan", "/missing-grok", "/missing-cursor")
+        self.assertEqual(found[0].name, "Grok")
+        self.assertEqual(found[0].project, "/home/kenan")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import argparse
+import errno
 import hmac
 import json
 import os
 import pathlib
+import secrets
+import socket
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
 
 
@@ -457,3 +463,141 @@ def report_once(config, matched, hostname: str, ip: str, speak: Speak, urlopen):
         return speak.connection_failed()
     except OSError:
         return speak.connection_failed()
+
+
+HUB = "http://192.168.0.69:8787"
+BIND = ("0.0.0.0", 8787)
+CONFIG_PATH = pathlib.Path.home() / ".config" / "agent-lan" / "config.json"
+
+
+def dispatch(method: str, path: str, headers: dict, body: bytes, board: Board):
+    route = path.split("?", 1)[0]
+    if method == "GET" and route == "/api/agents":
+        payload = json.dumps({"agents": board.agents()}).encode()
+        return 200, payload, "application/json"
+    if method == "GET" and route == "/":
+        return 200, render_page().encode(), "text/html; charset=utf-8"
+    if method == "POST" and route == "/api/report":
+        status, payload = board.post(body, headers.get("X-Agent-Lan-Token"))
+        return status, payload, "application/json"
+    return 404, b"", "text/plain"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self._send("GET", b"")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        self._send("POST", self.rfile.read(length))
+
+    def _send(self, method: str, body: bytes):
+        status, payload, content_type = dispatch(method, self.path, self.headers, body, self.server.board)
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def prepare_board(path) -> dict:
+    path = pathlib.Path(path)
+    created = not path.exists()
+    config = ensure_config(path, HUB, secrets.token_urlsafe(16))
+    if created:
+        print(copy_instruction(path))
+    return config
+
+
+def load_sessions(path: str) -> list[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict) and "pid" in item and "session_id" in item]
+
+
+def collect(proc_root: str, own_pid: int, home: str, grok_home: str, cursor_projects: str):
+    processes = read_processes(proc_root)
+    matched = match_agents(processes, own_pid, home)
+    sessions = load_sessions(os.path.join(grok_home, "active_sessions.json"))
+
+    def read_text(path: str):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except OSError:
+            return None
+
+    return attach_files(matched, sessions, read_text, grok_home, cursor_projects)
+
+
+def udp_opener(host: str, port: int):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.connect((host, port))
+    return sock
+
+
+def run_board(config_path, port: int = 8787) -> int:
+    prepare_board(config_path)
+    config = require_config(config_path)
+    board = Board(config["token"])
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            print("port 8787 is in use")
+            return 1
+        raise
+    server.board = board
+    print("board listening on http://127.0.0.1:8787")
+    server.serve_forever()
+    return 0
+
+
+def run_report(config_path, once: bool = False) -> int:
+    try:
+        config = require_config(config_path)
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            print(exc.code)
+        return 1
+    home = str(pathlib.Path.home())
+    hub = urllib.parse.urlparse(config["hub"])
+    speak = Speak()
+    while True:
+        matched = collect(
+            "/proc",
+            os.getpid(),
+            home,
+            os.path.join(home, ".grok"),
+            os.path.join(home, ".cursor", "projects"),
+        )
+        ip = local_ip_toward(hub.hostname or "127.0.0.1", hub.port or 80, udp_opener)
+        line = report_once(config, matched, socket.gethostname(), ip, speak, urllib.request.urlopen)
+        if line:
+            print(line)
+        if once:
+            return 0
+        time.sleep(REPORT_INTERVAL)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="agent_lan")
+    parser.add_argument("command", choices=("board", "report"))
+    parser.add_argument("--config", default=str(CONFIG_PATH))
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args(argv)
+    if args.command == "board":
+        return run_board(args.config)
+    return run_report(args.config, once=args.once)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

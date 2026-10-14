@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import time
 import urllib.parse
 from dataclasses import dataclass
 
@@ -231,3 +233,43 @@ def attach_files(matched, sessions, read_text, grok_home: str, cursor_projects: 
             continue
         attached.append(item)
     return attached
+
+
+STALE_SECONDS = 12
+
+
+class Board:
+    def __init__(self, token: str, now=None):
+        self.token = token
+        self.now = now or time.time
+        self._hosts: dict[str, tuple[float, dict]] = {}
+
+    def post(self, body: bytes, token_header: str | None) -> tuple[int, bytes]:
+        if token_header is None or not hmac.compare_digest(token_header, self.token):
+            return 401, b""
+        try:
+            data = json.loads(body.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return 400, b""
+        if not isinstance(data, dict) or not data.get("hostname") or not isinstance(data.get("agents"), list):
+            return 400, b""
+        self._hosts[data["hostname"]] = (float(self.now()), data)
+        return 200, b""
+
+    def agents(self) -> list[dict]:
+        now = float(self.now())
+        rows = []
+        for hostname, (seen, note) in self._hosts.items():
+            if now - seen >= STALE_SECONDS:
+                continue
+            for agent in note["agents"]:
+                rows.append({
+                    "hostname": hostname,
+                    "ip": note.get("ip", ""),
+                    "name": agent.get("name", ""),
+                    "project": agent.get("project", ""),
+                    "file": agent.get("file", ""),
+                    "action": agent.get("action", ""),
+                    "seen_at": seen,
+                })
+        return rows

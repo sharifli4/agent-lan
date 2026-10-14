@@ -169,5 +169,41 @@ class TestAttach(unittest.TestCase):
         self.assertEqual(out, matched)
 
 
+class TestBoard(unittest.TestCase):
+    def note(self, agents):
+        return json.dumps({"hostname": "asus-rog", "ip": "192.168.0.69", "agents": agents}).encode()
+
+    def test_replace_expiry_and_token(self):
+        clock = {"now": 100.0}
+        board = agent_lan.Board("secret", now=lambda: clock["now"])
+        first = self.note([
+            {"name": "Grok", "project": "/home/kenan", "file": "/home/kenan/a.py", "action": "editing"},
+            {"name": "Cursor agent", "project": "/repo", "file": "", "action": ""},
+        ])
+        self.assertEqual(board.post(first, "secret")[0], 200)
+        self.assertEqual(len(board.agents()), 2)
+        second = self.note([
+            {"name": "Grok", "project": "/home/kenan", "file": "/home/kenan/c.py", "action": "editing"}
+        ])
+        board.post(second, "secret")
+        rows = board.agents()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["file"], "/home/kenan/c.py")
+        self.assertEqual(rows[0]["hostname"], "asus-rog")
+        self.assertEqual(rows[0]["ip"], "192.168.0.69")
+        self.assertEqual(rows[0]["seen_at"], 100.0)
+        self.assertEqual(board.post(second, None)[0], 401)
+        self.assertEqual(board.post(second, "wrong")[0], 401)
+        self.assertEqual(len(board.agents()), 1)
+        self.assertEqual(board.post(b"{", "secret")[0], 400)
+        self.assertEqual(board.post(b"{}", "secret")[0], 400)
+        self.assertEqual(len(board.agents()), 1)
+        clock["now"] = 111.0
+        self.assertEqual(len(board.agents()), 1)
+        clock["now"] = 112.0
+        self.assertEqual(board.agents(), [])
+        self.assertEqual(agent_lan.STALE_SECONDS, 12)
+
+
 if __name__ == "__main__":
     unittest.main()
